@@ -20,10 +20,11 @@ st.set_page_config(
 
 
 # ============================================================
-# MODEL CONFIGURATION
+# MODEL CONFIGURATION & CACHING
 # ============================================================
 
-MODEL_PATH = "model/final_emotion_mobilenetv2.keras"
+CNN_MODEL_PATH = "model/facial_emotion_cnn.keras"
+MOBILENET_MODEL_PATH = "model/final_emotion_mobilenetv2.keras"
 
 EMOTIONS = [
     "Angry",
@@ -36,21 +37,18 @@ EMOTIONS = [
 ]
 
 
-# ============================================================
-# LOAD MOBILENETV2
-# ============================================================
+@st.cache_resource
+def load_cnn_model():
+    return tf.keras.models.load_model(CNN_MODEL_PATH)
+
 
 @st.cache_resource
-def load_model():
-
-    model = tf.keras.models.load_model(
-        MODEL_PATH
-    )
-
-    return model
+def load_mobilenet_model():
+    return tf.keras.models.load_model(MOBILENET_MODEL_PATH)
 
 
-model = load_model()
+cnn_model = load_cnn_model()
+mobilenet_model = load_mobilenet_model()
 
 
 # ============================================================
@@ -63,52 +61,50 @@ face_detector = cv2.CascadeClassifier(
 )
 
 
+def detect_faces(gray_img):
+    faces = face_detector.detectMultiScale(
+        gray_img,
+        scaleFactor=1.1,
+        minNeighbors=5,
+        minSize=(40, 40)
+    )
+    if len(faces) == 0:
+        # Fallback to slightly more sensitive detection
+        faces = face_detector.detectMultiScale(
+            gray_img,
+            scaleFactor=1.05,
+            minNeighbors=3,
+            minSize=(30, 30)
+        )
+    return faces
+
+
 # ============================================================
 # PREDICTION FUNCTION
 # ============================================================
 
-def predict_face(face):
+def predict_face(face, use_cnn=True):
+    if use_cnn:
+        # Custom CNN: Grayscale (48 x 48 x 1)
+        gray = cv2.cvtColor(face, cv2.COLOR_BGR2GRAY)
+        face_resized = cv2.resize(gray, (48, 48))
+        face_norm = face_resized.astype(np.float32) / 255.0
+        face_input = np.expand_dims(
+            np.expand_dims(face_norm, axis=-1),
+            axis=0
+        )
+        probabilities = cnn_model.predict(face_input, verbose=0)[0]
+    else:
+        # MobileNetV2: RGB (96 x 96 x 3)
+        rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
+        face_resized = cv2.resize(rgb, (96, 96))
+        face_norm = face_resized.astype(np.float32) / 255.0
+        face_input = np.expand_dims(face_norm, axis=0)
+        probabilities = mobilenet_model.predict(face_input, verbose=0)[0]
 
-    # Convert BGR → RGB
-    face = cv2.cvtColor(
-        face,
-        cv2.COLOR_BGR2RGB
-    )
-
-    # Resize for MobileNetV2
-    face = cv2.resize(
-        face,
-        (96, 96)
-    )
-
-    # Normalize
-    face = face.astype(
-        np.float32
-    ) / 255.0
-
-    # Add batch dimension
-    face = np.expand_dims(
-        face,
-        axis=0
-    )
-
-    # Prediction
-    probabilities = model.predict(
-        face,
-        verbose=0
-    )[0]
-
-    predicted_class = int(
-        np.argmax(probabilities)
-    )
-
-    emotion = EMOTIONS[
-        predicted_class
-    ]
-
-    confidence = float(
-        probabilities[predicted_class]
-    )
+    predicted_class = int(np.argmax(probabilities))
+    emotion = EMOTIONS[predicted_class]
+    confidence = float(probabilities[predicted_class])
 
     return (
         emotion,
@@ -121,27 +117,35 @@ def predict_face(face):
 # SIDEBAR
 # ============================================================
 
-st.sidebar.title("⚙️ Model Information")
+st.sidebar.title("⚙️ Model Configuration")
 
-st.sidebar.success(
-    "MobileNetV2 loaded"
+model_choice = st.sidebar.selectbox(
+    "Choose Model Architecture",
+    [
+        "Custom CNN (48×48 - Recommended)",
+        "MobileNetV2 (96×96 - Experimental)"
+    ],
+    index=0,
+    help="Custom CNN is specifically trained on FER-2013 and produces balanced predictions across all 7 emotions."
 )
 
-st.sidebar.write(
-    "**Input:** 96 × 96 × 3"
-)
+use_cnn_model = "Custom CNN" in model_choice
 
-st.sidebar.write(
-    "**Dataset:** FER-2013"
-)
+st.sidebar.markdown("---")
+st.sidebar.subheader("Model Status")
 
-st.sidebar.write(
-    "**Classes:** 7"
-)
-
-st.sidebar.write(
-    "**Architecture:** MobileNetV2"
-)
+if use_cnn_model:
+    st.sidebar.success("✅ Custom CNN Active")
+    st.sidebar.write("**Input:** 48 × 48 (Grayscale)")
+    st.sidebar.write("**Dataset:** FER-2013")
+    st.sidebar.write("**Classes:** 7 emotions")
+    st.sidebar.write("**Validation Accuracy:** ~58% (Balanced across all emotions)")
+else:
+    st.sidebar.warning("⚠️ MobileNetV2 Active")
+    st.sidebar.write("**Input:** 96 × 96 (RGB)")
+    st.sidebar.write("**Dataset:** FER-2013")
+    st.sidebar.write("**Classes:** 7 emotions")
+    st.sidebar.info("Note: The current MobileNetV2 weights exhibit mode collapse toward 'Angry'.")
 
 
 # ============================================================
@@ -153,7 +157,7 @@ st.title(
 )
 
 st.subheader(
-    "MobileNetV2 • Transfer Learning • Real-Time Vision"
+    "Deep Learning • Computer Vision • Real-Time Recognition"
 )
 
 st.write(
@@ -202,7 +206,6 @@ with image_tab:
         col1, col2 = st.columns(2)
 
         with col1:
-
             st.image(
                 image,
                 caption="Uploaded Image",
@@ -232,22 +235,15 @@ with image_tab:
                     cv2.COLOR_BGR2GRAY
                 )
 
-                faces = face_detector.detectMultiScale(
-                    gray,
-                    scaleFactor=1.1,
-                    minNeighbors=5,
-                    minSize=(60, 60)
-                )
+                faces = detect_faces(gray)
 
                 if len(faces) == 0:
-
                     st.warning(
-                        "No face detected. "
-                        "Please upload a clear face image."
+                        "No face detected by the Haar Cascade detector. "
+                        "Analyzing entire image as face region..."
                     )
-
+                    face = image_bgr
                 else:
-
                     # Use largest detected face
                     x, y, w, h = max(
                         faces,
@@ -259,36 +255,44 @@ with image_tab:
                         x:x+w
                     ]
 
-                    # Prediction
-                    emotion, confidence, probabilities = (
-                        predict_face(face)
+                # Show cropped face
+                face_preview = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
+                st.image(
+                    face_preview,
+                    caption="Extracted Face",
+                    width=140
+                )
+
+                # Prediction
+                emotion, confidence, probabilities = predict_face(
+                    face,
+                    use_cnn=use_cnn_model
+                )
+
+                st.success(
+                    f"### Detected Emotion: {emotion}"
+                )
+
+                st.metric(
+                    "Confidence",
+                    f"{confidence * 100:.2f}%"
+                )
+
+                st.subheader(
+                    "Emotion Probabilities"
+                )
+
+                for i, probability in enumerate(
+                    probabilities
+                ):
+                    st.write(
+                        f"**{EMOTIONS[i]}** "
+                        f"{probability * 100:.2f}%"
                     )
 
-                    st.success(
-                        f"### {emotion}"
+                    st.progress(
+                        float(probability)
                     )
-
-                    st.metric(
-                        "Confidence",
-                        f"{confidence * 100:.2f}%"
-                    )
-
-                    st.subheader(
-                        "Emotion Probabilities"
-                    )
-
-                    for i, probability in enumerate(
-                        probabilities
-                    ):
-
-                        st.write(
-                            f"**{EMOTIONS[i]}** "
-                            f"{probability * 100:.2f}%"
-                        )
-
-                        st.progress(
-                            float(probability)
-                        )
 
 
 # ============================================================
@@ -306,10 +310,11 @@ with webcam_tab:
     )
 
     st.write(
-        "The system detects the face first and "
-        "then sends the cropped RGB face to MobileNetV2."
+        f"Active model: **{'Custom CNN (48×48)' if use_cnn_model else 'MobileNetV2 (96×96)'}**"
     )
 
+    # Closure flag for webcam worker thread
+    use_cnn_thread = use_cnn_model
 
     def video_frame_callback(frame):
 
@@ -325,12 +330,7 @@ with webcam_tab:
         )
 
         # Detect faces
-        faces = face_detector.detectMultiScale(
-            gray,
-            scaleFactor=1.1,
-            minNeighbors=5,
-            minSize=(60, 60)
-        )
+        faces = detect_faces(gray)
 
         # Process every face
         for (x, y, w, h) in faces:
@@ -341,9 +341,10 @@ with webcam_tab:
                 x:x+w
             ]
 
-            # MobileNetV2 prediction
+            # Prediction
             emotion, confidence, _ = predict_face(
-                face
+                face,
+                use_cnn=use_cnn_thread
             )
 
             # Draw face rectangle
@@ -388,13 +389,9 @@ with webcam_tab:
             format="bgr24"
         )
 
-
     webrtc_streamer(
-        key="mobilenet-emotion-recognition",
-
-        video_frame_callback=
-        video_frame_callback,
-
+        key=f"emotion-streamer-{'cnn' if use_cnn_model else 'mobilenet'}",
+        video_frame_callback=video_frame_callback,
         media_stream_constraints={
             "video": True,
             "audio": False
@@ -414,23 +411,13 @@ st.subheader(
 
 st.write(
     """
-    Image / Webcam
-    ↓
-    Face Detection
-    ↓
-    Face Crop
-    ↓
-    RGB 96×96
-    ↓
-    MobileNetV2
-    ↓
-    Emotion Classification
-    ↓
-    Confidence Score
+    1. **Face Detection**: Haar Cascade locates faces in the input image or webcam frame.
+    2. **Face Extraction**: The face is cropped and preprocessed (grayscale 48×48 for Custom CNN, RGB 96×96 for MobileNetV2).
+    3. **Inference**: Neural network calculates probabilities across all 7 FER-2013 emotion categories.
+    4. **Visualization**: Displays the bounding box, predicted emotion, and confidence scores.
     """
 )
 
 st.caption(
-    "FER-2013 • MobileNetV2 Transfer Learning • "
-    "Real-Time Facial Emotion Recognition"
+    "FER-2013 Dataset • 7 Emotion Classes: Angry, Disgust, Fear, Happy, Sad, Surprise, Neutral"
 )
